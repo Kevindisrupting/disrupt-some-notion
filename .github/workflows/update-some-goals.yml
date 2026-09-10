@@ -1,0 +1,27 @@
+name: Update SoMe goals in Notion
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 7 * * 1'
+      timezone: 'Europe/Oslo'
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: python -m pip install requests
+
+      - name: Update Notion KPIs
+        env:
+          METRIKA_TOKEN: ${{ secrets.METRIKA_TOKEN }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        run: python update_some_goals.py
