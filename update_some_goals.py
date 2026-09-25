@@ -216,6 +216,40 @@ def ig_net_followers(identifier, month_start):
     return follows - unfollows, f"Meta: {follows} nye følgere − {unfollows} avfølginger {start:%d.%m}–{end:%d.%m}"
 
 
+def ig_month_total(identifier, month_start, metric, summable):
+    """Månedstall for en Meta-metrikk (total_value). Unike metrikker (summable=False)
+    hentes i ETT uttak og returnerer None hvis Meta avviser perioden. Summerbare
+    metrikker hentes i biter på maks 29 dager og legges sammen."""
+    tok = ig_token(identifier)
+    if not tok:
+        return None, "ingen Instagram-token"
+    start = datetime(month_start.year, month_start.month, 1, tzinfo=OSLO)
+    end = datetime.combine(month_end(month_start) + timedelta(days=1), datetime.min.time(), tzinfo=OSLO)
+    end = min(end, datetime.now(OSLO))
+    step = timedelta(days=29) if summable else (end - start)
+    total, cur = 0, start
+    while cur < end:
+        nxt = min(cur + step, end)
+        r = requests.get(f"{IG_API}/me/insights", params={
+            "metric": metric, "period": "day", "metric_type": "total_value",
+            "since": int(cur.timestamp()), "until": int(nxt.timestamp()), "access_token": tok}, timeout=30)
+        if not r.ok:
+            return None, f"Meta ga ikke {metric} for perioden ({r.status_code})"
+        vals = [(d.get("total_value") or {}).get("value") for d in r.json().get("data", []) if d.get("name") == metric]
+        if not vals or not isinstance(vals[0], int):
+            return None, f"Meta returnerte ingen {metric}-verdi"
+        total += vals[0]
+        cur = nxt
+    return total, f"Meta {metric} {start:%Y-%m-%d}–{end:%Y-%m-%d}"
+
+
+# Engasjement som skrives ved månedsslutt: (Notion-kolonne, Meta-metrikk, summerbar?)
+IG_ENGAGEMENT = [
+    ("Instagram-engasjerte kontoer", "accounts_engaged", False),
+    ("Instagram-interaksjoner", "total_interactions", True),
+]
+
+
 def monthly_unique_reach(platform, identifier, month_start):
     """Unik rekkevidde (unike kontoer) for HELE måneden, ett kall – aldri summert.
     Bare Instagram via Meta. Returnerer (verdi, notat). Visninger brukes aldri."""
@@ -379,6 +413,14 @@ def update_monthly_tables(nt, results, today, target, closing):
                     notes.append(f"{platform}-rekkevidde {reach} ({rnote})")
                 else:
                     notes.append(f"{platform}-rekkevidde tom: {rnote}")
+                if platform == "Instagram":
+                    for col, metric_name, summable in IG_ENGAGEMENT:
+                        v, en = ig_month_total(key[1], target, metric_name, summable)
+                        if isinstance(v, int):
+                            props[col] = {"number": v}
+                            notes.append(f"{col} {v} ({en})")
+                        else:
+                            notes.append(f"{col} tom: {en}")
             else:
                 notes.append(f"{platform}-rekkevidde settes ved månedsslutt")
 
@@ -448,7 +490,12 @@ def meta_selftest():
             print(f"  startpunkt:    {month_label(prev_month(ms))} ≈ {f - n}")
         r, rn = monthly_unique_reach("instagram", ident, ms)
         print(f"  rekkevidde:    {r if r is not None else 'FEIL'} ({rn})")
-        failed += sum(x is None for x in (f, n, r))
+        eng = []
+        for col, metric_name, summable in IG_ENGAGEMENT:
+            v, en = ig_month_total(ident, ms, metric_name, summable)
+            print(f"  {col}: {v if v is not None else 'FEIL'} ({en})")
+            eng.append(v)
+        failed += sum(x is None for x in (f, n, r, *eng))
     print(f"\n=== {'ALT OK' if not failed else f'{failed} FEIL'} ===")
     sys.exit(1 if failed else 0)
 
