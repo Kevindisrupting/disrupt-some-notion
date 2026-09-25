@@ -2,9 +2,22 @@ name: Update SoMe goals in Notion
 
 on:
   workflow_dispatch:
+    inputs:
+      close_month:
+        description: "Lukk en bestemt måned (YYYY-MM). La stå tomt for vanlig kjøring."
+        required: false
+        default: ""
   schedule:
+    # Ukentlig: Nåverdi + løpende tall for inneværende måned
     - cron: '30 7 * * 1'
       timezone: 'Europe/Oslo'
+    # Den 1. hver måned: sluttall (følgere + rekkevidde) for forrige måned
+    - cron: '20 0 1 * *'
+      timezone: 'Europe/Oslo'
+
+concurrency:
+  group: some-notion
+  cancel-in-progress: false
 
 jobs:
   update:
@@ -12,16 +25,23 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
-      - run: python -m pip install requests
+      - run: python -m pip install requests pynacl
 
       - name: Update Notion KPIs
         env:
           METRIKA_TOKEN: ${{ secrets.METRIKA_TOKEN }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          IG_TOKEN_DISRUPT: ${{ secrets.IG_TOKEN_DISRUPT }}
+          IG_TOKEN_PU: ${{ secrets.IG_TOKEN_PU }}
+          IG_TOKEN_HOUSEHOLD: ${{ secrets.IG_TOKEN_HOUSEHOLD }}
+          IG_TOKEN_VALSEMOLLEN: ${{ secrets.IG_TOKEN_VALSEMOLLEN }}
+          GH_SECRETS_PAT: ${{ secrets.GH_SECRETS_PAT }}
+          RUN_MODE: ${{ github.event.schedule == '20 0 1 * *' && 'close' || 'auto' }}
+          CLOSE_MONTH: ${{ inputs.close_month }}
         run: python update_some_goals.py
