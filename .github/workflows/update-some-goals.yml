@@ -7,6 +7,10 @@ on:
         description: "Lukk en bestemt måned (YYYY-MM). La stå tomt for vanlig kjøring."
         required: false
         default: ""
+      test_meta:
+        description: "Test Meta (følgere, netto, rekkevidde) uten å skrive til Notion"
+        type: boolean
+        default: false
   schedule:
     # Ukentlig: Nåverdi + løpende tall for inneværende måned
     - cron: '30 7 * * 1'
@@ -44,4 +48,5 @@ jobs:
           GH_SECRETS_PAT: ${{ secrets.GH_SECRETS_PAT }}
           RUN_MODE: ${{ github.event.schedule == '20 0 1 * *' && 'close' || 'auto' }}
           CLOSE_MONTH: ${{ inputs.close_month }}
+          TEST_META: ${{ inputs.test_meta }}
         run: python update_some_goals.py
