@@ -54,6 +54,10 @@ jobs:
           IG_TOKEN_HOUSEHOLD: ${{ secrets.IG_TOKEN_HOUSEHOLD }}
           IG_TOKEN_VALSEMOLLEN: ${{ secrets.IG_TOKEN_VALSEMOLLEN }}
           GH_SECRETS_PAT: ${{ secrets.GH_SECRETS_PAT }}
+          TT_CLIENT_KEY: ${{ secrets.TT_CLIENT_KEY }}
+          TT_CLIENT_SECRET: ${{ secrets.TT_CLIENT_SECRET }}
+          TT_REFRESH_DISRUPT: ${{ secrets.TT_REFRESH_DISRUPT }}
+          TT_REFRESH_PU: ${{ secrets.TT_REFRESH_PU }}
           RUN_MODE: ${{ github.event.schedule == '20 0 1 * *' && 'close' || 'auto' }}
           CLOSE_MONTH: ${{ inputs.close_month }}
           TEST_META: ${{ inputs.test_meta }}
