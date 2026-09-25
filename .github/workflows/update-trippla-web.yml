@@ -1,0 +1,43 @@
+name: Trippel A – nettbesøk til Notion
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Test tilgang uten å skrive til Notion"
+        type: boolean
+        default: true
+  schedule:
+    # Hver mandag: besøk for inneværende og forrige måned
+    - cron: '40 7 * * 1'
+      timezone: 'Europe/Oslo'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/178807112627/locations/global/workloadIdentityPools/github/providers/github-actions
+          service_account: ga-lesetilgang@disrupt-statistikk.iam.gserviceaccount.com
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - run: python -m pip install requests google-analytics-data
+
+      - name: Oppdater Trippel A i Notion
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          GA_PROPERTY: '555996378'
+          GA_START_MONTH: '2026-10'
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: python update_trippla_web.py
