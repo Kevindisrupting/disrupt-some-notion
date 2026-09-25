@@ -1,26 +1,25 @@
 """
 Disrupt — SoMe → Notion
 
-1) Ukentlig (som før): oppdaterer Nåverdi i «Mål — 2026».
-2) Nytt: fyller SoMe-kolonnene i månedstabellene på «KPI – Konseptnivå»
-   (Disrupt, Project Undergrunn, HOUSEHOLD – månedsmålinger).
+1) Oppdaterer Nåverdi i «Mål — 2026» (Instagram fra Meta, øvrige fra Metrika).
+2) Fyller SoMe-kolonnene i månedstabellene på «KPI – Konseptnivå»
+   (Disrupt, Project Undergrunn, HOUSEHOLD, Valsemøllen).
 
-Kjøremodus (RUN_MODE / CLOSE_MONTH):
-  - auto   : den 1. i måneden (Oslo-tid) lukkes forrige måned, ellers oppdateres
-             inneværende måned med løpende tall.
-  - close  : lukk forrige måned (brukes av kjøringen den 1.).
+Kjøremodus:
+  - auto (mandager): løpende følgertall for inneværende måned.
+  - den 1. / close : sluttall for forrige måned + rekkevidde, engasjement, visninger.
   - CLOSE_MONTH=YYYY-MM : lukk en bestemt måned manuelt.
+  - WRITE_PARTIAL=true  : skriv også rekkevidde/engasjement/visninger for måneden hittil.
+  - BACKFILL_FROM=YYYY-MM : hent historikk fra Meta (ca. 90 dager tilbake).
+  - TEST_META=true      : test Meta-kallene uten å skrive til Notion.
 
 Regler:
-  - Hjelpekolonner «<Plattform>-følgere ved månedsslutt» opprettes ved behov.
-  - Netto nye = følgere ved månedsslutt (denne raden) − følgere ved månedsslutt
-    (forrige måneds rad). Mangler forrige tall → feltet står tomt.
-  - Rekkevidde fylles KUN hvis kilden gir unik rekkevidde for hele måneden.
-    Metrika gir ikke dette i dag, så rekkeviddefeltene røres ikke.
-    Visninger brukes aldri.
+  - Netto nye = følgere ved månedsslutt − forrige måneds; for Instagram brukes
+    følg − avfølg fra Meta når forrige tall mangler.
+  - Rekkevidde og engasjerte kontoer er unike tall og hentes i ett uttak (maks 30 dager).
+    Visninger og interaksjoner kan summeres. Visninger brukes aldri som rekkevidde.
   - Datastatus → «Foreløpig». Rader med «Kontrollert» røres ikke.
-  - Oppdatert → dagens dato. Kildenotat: en linje som starter med «[Auto SoMe]»
-    erstattes; manuell tekst i notatet beholdes.
+  - Kildenotat: linjen «[Auto SoMe]» erstattes; manuell tekst beholdes.
 """
 
 import os
@@ -247,6 +246,7 @@ def ig_month_total(identifier, month_start, metric, summable):
 IG_ENGAGEMENT = [
     ("Instagram-engasjerte kontoer", "accounts_engaged", False),
     ("Instagram-interaksjoner", "total_interactions", True),
+    ("Instagram-visninger", "views", True),
 ]
 
 
@@ -405,8 +405,9 @@ def update_monthly_tables(nt, results, today, target, closing):
             src = metric.get("source", "Metrika")
             notes.append(f"{platform} {value} ({src}, hentet {ca}); {net_txt}")
 
-            # Rekkevidde bare for hele, avsluttede måneder – aldri delmåned, aldri visninger
-            if closing:
+            # Rekkevidde/engasjement/visninger skrives for hele måneder den 1., eller for
+            # måneden hittil når WRITE_PARTIAL=true (test). Sluttkjøringen den 1. overskriver.
+            if closing or os.getenv("WRITE_PARTIAL") == "true":
                 reach, rnote = monthly_unique_reach(*key, target)
                 if isinstance(reach, int):
                     props[f"{platform}-rekkevidde"] = {"number": reach}
@@ -422,14 +423,16 @@ def update_monthly_tables(nt, results, today, target, closing):
                         else:
                             notes.append(f"{col} tom: {en}")
             else:
-                notes.append(f"{platform}-rekkevidde settes ved månedsslutt")
+                notes.append(f"{platform}-rekkevidde/engasjement settes ved månedsslutt")
 
         if not props:
             print("  ingen tall å skrive")
             continue
 
         notes.append("Visninger brukes ikke som rekkevidde.")
-        status_txt = "sluttall" if closing else "løpende tall, ikke endelig"
+        status_txt = ("sluttall" if closing else
+                      "løpende tall hittil i måneden (inkl. rekkevidde/engasjement for delmåned), ikke endelig"
+                      if os.getenv("WRITE_PARTIAL") == "true" else "løpende tall, ikke endelig")
         auto_line = f"{AUTO_PREFIX} {today.isoformat()}, {status_txt}: " + " | ".join(notes)
         manual = [l for l in plain_text(row, "Kildenotat").splitlines() if not l.startswith(AUTO_PREFIX)]
         kildenotat = "\n".join(manual + [auto_line]).strip()[:2000]
@@ -500,9 +503,90 @@ def meta_selftest():
     sys.exit(1 if failed else 0)
 
 
+def create_month_row(nt, ds_id, ms):
+    body = {"parent": {"type": "data_source_id", "data_source_id": ds_id},
+            "properties": {"Måned": {"title": [{"text": {"content": month_label(ms).capitalize()}}]},
+                           "Periode": {"date": {"start": ms.isoformat()}},
+                           "Datastatus": {"select": {"name": "Mangler tall"}}}}
+    r = requests.post(f"{NOTION_API}/pages", headers=nh(nt, NOTION_VERSION_DS), json=body, timeout=30)
+    r.raise_for_status()
+    print(f"  + opprettet rad {month_label(ms)}")
+    return r.json()
+
+
+def backfill(nt, today, start):
+    """Fyller hele, avsluttede måneder fra `start` til forrige måned med Instagram-tall
+    fra Meta. Følgertall ved månedsslutt regnes bakover fra dagens tall med
+    følg/avfølg per måned. Meta lagrer kontodata i ca. 90 dager, så eldre måneder
+    blir stående tomme med forklaring. Rader med Kontrollert røres ikke."""
+    last = prev_month(today)
+    months, m = [], start
+    while m <= last:
+        months.append(m)
+        m = month_start(month_end(m) + timedelta(days=1))
+    print(f"=== BACKFILL {month_label(months[0])}–{month_label(months[-1])} ===")
+    for t in MONTHLY_TABLES:
+        if "Instagram" not in t["accounts"]:
+            continue
+        ident = t["accounts"]["Instagram"][1]
+        print(f"[{t['name']}] @{ident}")
+        ensure_helper_columns(nt, t["data_source_id"], t["accounts"].keys())
+        cur, cm = ig_followers(ident)
+        if cur is None:
+            gh_warn(f"{t['name']}: backfill avbrutt ({cm})")
+            continue
+        # netto for inneværende måned hittil, så hver avsluttet måned bakover
+        running_end = cur
+        n_now, _ = ig_net_followers(ident, month_start(today))
+        running_end = cur - n_now if isinstance(n_now, int) else None
+        for ms in reversed(months):
+            row = find_month_row(nt, t["data_source_id"], ms) or create_month_row(nt, t["data_source_id"], ms)
+            if select_name(row, "Datastatus") == "Kontrollert":
+                print(f"  = {month_label(ms)} Kontrollert – røres ikke")
+                n, _ = ig_net_followers(ident, ms)
+                running_end = running_end - n if isinstance(running_end, int) and isinstance(n, int) else None
+                continue
+            props, notes = {}, []
+            end_followers = running_end
+            n, nn = ig_net_followers(ident, ms)
+            if isinstance(n, int):
+                props["Netto nye Instagram-følgere"] = {"number": n}
+                notes.append(f"netto {n:+d} ({nn})")
+            else:
+                notes.append(f"netto tom: {nn}")
+            if isinstance(end_followers, int):
+                props["Instagram-følgere ved månedsslutt"] = {"number": end_followers}
+                notes.append(f"følgere ved månedsslutt ≈ {end_followers} (regnet bakover fra {cur} i dag)")
+            running_end = end_followers - n if isinstance(end_followers, int) and isinstance(n, int) else None
+            r, rn = monthly_unique_reach("instagram", ident, ms)
+            if isinstance(r, int):
+                props["Instagram-rekkevidde"] = {"number": r}
+            notes.append(f"rekkevidde {r if r is not None else 'tom'} ({rn})")
+            for col, metric_name, summable in IG_ENGAGEMENT:
+                v, en = ig_month_total(ident, ms, metric_name, summable)
+                if isinstance(v, int):
+                    props[col] = {"number": v}
+                notes.append(f"{col} {v if v is not None else 'tom'} ({en})")
+            if not props:
+                print(f"  - {month_label(ms)}: ingen data fra Meta (trolig eldre enn ~90 dager)")
+                continue
+            line = f"{AUTO_PREFIX} {today.isoformat()}, historikk hentet i ettertid: " + " | ".join(notes)
+            manual = [l for l in plain_text(row, "Kildenotat").splitlines() if not l.startswith(AUTO_PREFIX)]
+            props["Kildenotat"] = {"rich_text": [{"type": "text", "text": {"content": "\n".join(manual + [line]).strip()[:2000]}}]}
+            props["Datastatus"] = {"select": {"name": "Foreløpig"}}
+            props["Oppdatert"] = {"date": {"start": today.isoformat()}}
+            p = requests.patch(f"{NOTION_API}/pages/{row['id']}", headers=nh(nt), json={"properties": props}, timeout=30)
+            p.raise_for_status()
+            print(f"  UPDATE {month_label(ms)}: {', '.join(k for k in props if k not in ('Kildenotat', 'Datastatus', 'Oppdatert'))}")
+
+
 def main():
     if os.getenv("TEST_META") == "true":
         meta_selftest()
+    if os.getenv("BACKFILL_FROM"):
+        y, m = map(int, os.environ["BACKFILL_FROM"].split("-"))
+        backfill(need("NOTION_TOKEN"), datetime.now(OSLO).date(), date(y, m, 1))
+        print("Backfill ferdig.")
     mt = need("METRIKA_TOKEN")
     nt = need("NOTION_TOKEN")
     today = datetime.now(OSLO).date()
