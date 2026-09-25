@@ -178,6 +178,44 @@ def ig_followers(identifier):
     return v, {"collected_at": datetime.now(OSLO).isoformat(timespec="seconds"), "source": "Meta Instagram API"}
 
 
+def ig_net_followers(identifier, month_start):
+    """Netto nye følgere i måneden (hittil) = følg − avfølg fra Meta
+    (follows_and_unfollows, total_value, fordelt på follow_type). Hendelser kan
+    summeres, så perioden deles i biter på maks 30 dager. Returnerer (verdi, notat)."""
+    tok = ig_token(identifier)
+    if not tok:
+        return None, "ingen Instagram-token"
+    start = datetime(month_start.year, month_start.month, 1, tzinfo=OSLO)
+    end = datetime.combine(month_end(month_start) + timedelta(days=1), datetime.min.time(), tzinfo=OSLO)
+    end = min(end, datetime.now(OSLO))
+    follows = unfollows = 0
+    cur = start
+    while cur < end:
+        nxt = min(cur + timedelta(days=29), end)   # godt under Metas 30-dagersgrense
+        r = requests.get(f"{IG_API}/me/insights", params={
+            "metric": "follows_and_unfollows", "period": "day", "metric_type": "total_value",
+            "breakdown": "follow_type", "since": int(cur.timestamp()), "until": int(nxt.timestamp()),
+            "access_token": tok}, timeout=30)
+        if not r.ok:
+            return None, f"Meta ga ikke følg/avfølg ({r.status_code})"
+        found = False
+        for d in r.json().get("data", []):
+            if d.get("name") != "follows_and_unfollows":
+                continue
+            for b in (d.get("total_value") or {}).get("breakdowns", []):
+                for res in b.get("results", []):
+                    kind = (res.get("dimension_values") or [""])[0].upper()
+                    v = res.get("value") or 0
+                    if kind == "FOLLOWER":
+                        follows += v; found = True
+                    elif kind == "NON_FOLLOWER":
+                        unfollows += v; found = True
+        if not found:
+            return None, "Meta returnerte ingen følg/avfølg-tall"
+        cur = nxt
+    return follows - unfollows, f"Meta: {follows} nye følgere − {unfollows} avfølginger {start:%d.%m}–{end:%d.%m}"
+
+
 def monthly_unique_reach(platform, identifier, month_start):
     """Unik rekkevidde (unike kontoer) for HELE måneden, ett kall – aldri summert.
     Bare Instagram via Meta. Returnerer (verdi, notat). Visninger brukes aldri."""
@@ -319,7 +357,16 @@ def update_monthly_tables(nt, results, today, target, closing):
                 props[net_prop] = {"number": value - int(prev_val)}
                 net_txt = f"netto {value - int(prev_val):+d} mot {month_label(prev)} ({int(prev_val)})"
             else:
-                net_txt = f"netto ikke beregnet – mangler følgertall for {month_label(prev)}"
+                # Startpunkt mangler: for Instagram regnes startpunktet ut fra Meta
+                # (følgere nå − netto følg/avfølg siden månedsstart).
+                net, nnote = (ig_net_followers(key[1], target) if key[0] == "instagram"
+                              else (None, "ingen historikk i kilden"))
+                if isinstance(net, int):
+                    props[net_prop] = {"number": net}
+                    net_txt = (f"netto {net:+d} ({nnote}); utledet startpunkt "
+                               f"{month_label(prev)} ≈ {value - net}")
+                else:
+                    net_txt = f"netto ikke beregnet – mangler følgertall for {month_label(prev)} ({nnote})"
             ca = metric.get("collected_at", "?")
             src = metric.get("source", "Metrika")
             notes.append(f"{platform} {value} ({src}, hentet {ca}); {net_txt}")
@@ -384,7 +431,31 @@ def update_goals(nt, results):
     print(f"Mål — 2026: updated={updated}, skipped={skipped}")
 
 
+def meta_selftest():
+    """Testmodus: sjekker Meta-kallene for hver Instagram-konto for inneværende
+    måned så langt. Skriver ingenting til Notion. Feiler kjøringen hvis noe mangler."""
+    today = datetime.now(OSLO).date()
+    ms = month_start(today)
+    failed = 0
+    print(f"=== META-TEST ({month_label(ms)} hittil) – ingenting skrives til Notion ===")
+    for ident, secret in IG_TOKEN_SECRETS.items():
+        print(f"\n@{ident} ({secret})")
+        f, fm = ig_followers(ident)
+        print(f"  følgere:       {f if f is not None else 'FEIL – ' + fm}")
+        n, nn = ig_net_followers(ident, ms)
+        print(f"  netto nye:     {n if n is not None else 'FEIL'} ({nn})")
+        if f is not None and n is not None:
+            print(f"  startpunkt:    {month_label(prev_month(ms))} ≈ {f - n}")
+        r, rn = monthly_unique_reach("instagram", ident, ms)
+        print(f"  rekkevidde:    {r if r is not None else 'FEIL'} ({rn})")
+        failed += sum(x is None for x in (f, n, r))
+    print(f"\n=== {'ALT OK' if not failed else f'{failed} FEIL'} ===")
+    sys.exit(1 if failed else 0)
+
+
 def main():
+    if os.getenv("TEST_META") == "true":
+        meta_selftest()
     mt = need("METRIKA_TOKEN")
     nt = need("NOTION_TOKEN")
     today = datetime.now(OSLO).date()
