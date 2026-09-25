@@ -113,6 +113,17 @@ def main():
     if dry:
         # Testkall: siste 7 dager, bare for å bekrefte at tilgangen virker
         print("Siste 7 dager:", ga_sessions(client, today - dt.timedelta(days=7), today), "økter")
+        # Test Notion: les en rad og skriv tilbake samme «Oppdatert»-verdi (ingen reell endring)
+        title = f"{MONTHS[today.month - 1]} {today.year}"
+        row = find_row(title)
+        if not row:
+            raise RuntimeError(f"Notion: fant ikke raden «{title}» (mangler tabellen tilgang?)")
+        opp = row["properties"].get("Oppdatert", {}).get("date")
+        r = requests.patch(f"{NOTION_API}/pages/{row['id']}", headers=notion_headers(),
+                           json={"properties": {"Oppdatert": {"date": opp}}}, timeout=30)
+        if not r.ok:
+            raise RuntimeError(f"Notion skrivetest {r.status_code}: {r.text[:300]}")
+        print(f"Notion OK: leste og skrev «{title}» uten å endre tall")
 
 
 if __name__ == "__main__":
