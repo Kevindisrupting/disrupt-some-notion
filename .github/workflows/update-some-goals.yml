@@ -7,6 +7,14 @@ on:
         description: "Lukk en bestemt måned (YYYY-MM). La stå tomt for vanlig kjøring."
         required: false
         default: ""
+      backfill_from:
+        description: "Hent historikk fra måned (YYYY-MM), f.eks. 2026-01. Tomt = nei"
+        required: false
+        default: ""
+      write_partial:
+        description: "Skriv også rekkevidde, engasjement og visninger for måneden hittil (test)"
+        type: boolean
+        default: false
       test_meta:
         description: "Test Meta (følgere, netto, rekkevidde) uten å skrive til Notion"
         type: boolean
@@ -49,4 +57,6 @@ jobs:
           RUN_MODE: ${{ github.event.schedule == '20 0 1 * *' && 'close' || 'auto' }}
           CLOSE_MONTH: ${{ inputs.close_month }}
           TEST_META: ${{ inputs.test_meta }}
+          WRITE_PARTIAL: ${{ inputs.write_partial }}
+          BACKFILL_FROM: ${{ inputs.backfill_from }}
         run: python update_some_goals.py
