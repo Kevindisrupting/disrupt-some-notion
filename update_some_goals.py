@@ -275,6 +275,81 @@ def monthly_unique_reach(platform, identifier, month_start):
     return None, "Meta returnerte ingen reach-verdi"
 
 
+# ---------------------------------------------------------------- TikTok (Display API, personlige kontoer)
+# Per konto: refresh-token i GitHub-secret (roteres automatisk). App-nøkler i TT_CLIENT_KEY/SECRET.
+TT_API = "https://open.tiktokapis.com/v2"
+TT_REFRESH_SECRETS = {"disrupt_ofc": "TT_REFRESH_DISRUPT", "projectundergrunn": "TT_REFRESH_PU"}
+_tt_cache = {}
+
+
+def tt_access_token(identifier):
+    name = TT_REFRESH_SECRETS.get(identifier)
+    rt = os.getenv(name) if name else None
+    ck, cs = os.getenv("TT_CLIENT_KEY"), os.getenv("TT_CLIENT_SECRET")
+    if not (rt and ck and cs):
+        return None, "ingen TikTok-tilkobling"
+    mask(rt)
+    r = requests.post(f"{TT_API}/oauth/token/", data={
+        "client_key": ck, "client_secret": cs, "grant_type": "refresh_token", "refresh_token": rt},
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
+    j = r.json() if r.content else {}
+    if not r.ok or "access_token" not in j:
+        return None, f"TikTok-token feilet ({r.status_code} {j.get('error', '')})"
+    mask(j["access_token"])
+    new_rt = j.get("refresh_token")
+    if new_rt and new_rt != rt:
+        mask(new_rt)
+        write_github_secret(name, new_rt)
+    return j["access_token"], "ok"
+
+
+def tt_stats(identifier):
+    """{'followers', 'views_total', 'interactions_total'} for kontoen nå, eller (None, grunn).
+    Visninger/interaksjoner er summen over alle videoer (livstid) – månedstall = økningen."""
+    if identifier in _tt_cache:
+        return _tt_cache[identifier]
+    at, why = tt_access_token(identifier)
+    if not at:
+        _tt_cache[identifier] = (None, why)
+        return _tt_cache[identifier]
+    h = {"Authorization": f"Bearer {at}"}
+    u = requests.get(f"{TT_API}/user/info/", params={"fields": "open_id,display_name,follower_count,video_count"}, headers=h, timeout=30)
+    if not u.ok:
+        _tt_cache[identifier] = (None, f"TikTok user/info feilet ({u.status_code})")
+        return _tt_cache[identifier]
+    user = u.json().get("data", {}).get("user", {})
+    views = inter = n = 0
+    cursor = None
+    while True:
+        body = {"max_count": 20}
+        if cursor:
+            body["cursor"] = cursor
+        v = requests.post(f"{TT_API}/video/list/", params={"fields": "id,view_count,like_count,comment_count,share_count"},
+                          headers={**h, "Content-Type": "application/json"}, json=body, timeout=30)
+        if not v.ok:
+            _tt_cache[identifier] = (None, f"TikTok video/list feilet ({v.status_code})")
+            return _tt_cache[identifier]
+        d = v.json().get("data", {})
+        for vid in d.get("videos", []):
+            n += 1
+            views += vid.get("view_count") or 0
+            inter += (vid.get("like_count") or 0) + (vid.get("comment_count") or 0) + (vid.get("share_count") or 0)
+        if not d.get("has_more"):
+            break
+        cursor = d.get("cursor")
+    res = {"followers": user.get("follower_count"), "views_total": views, "interactions_total": inter,
+           "videos": n, "collected_at": datetime.now(OSLO).isoformat(timespec="seconds"), "source": "TikTok API"}
+    _tt_cache[identifier] = (res, "ok")
+    return _tt_cache[identifier]
+
+
+# (Notion-kolonne for månedstall, hjelpekolonne med livstidssum, nøkkel i tt_stats)
+TT_MONTHLY = [
+    ("TikTok-visninger", "TikTok-visninger totalt (hjelpetall)", "views_total"),
+    ("TikTok-interaksjoner", "TikTok-interaksjoner totalt (hjelpetall)", "interactions_total"),
+]
+
+
 # ---------------------------------------------------------------- Notion
 def nh(token, version=NOTION_VERSION):
     return {"Authorization": f"Bearer {token}", "Notion-Version": version, "Content-Type": "application/json"}
@@ -286,6 +361,11 @@ def ensure_helper_columns(nt, ds_id, platforms):
     existing = r.json().get("properties", {})
     missing = {f"{p}-følgere ved månedsslutt": {"number": {"format": "number_with_commas"}}
                for p in platforms if f"{p}-følgere ved månedsslutt" not in existing}
+    if "TikTok" in platforms:
+        for col, helper_col, _ in TT_MONTHLY:
+            for c in (col, helper_col):
+                if c not in existing:
+                    missing[c] = {"number": {"format": "number_with_commas"}}
     if missing:
         p = requests.patch(f"{NOTION_API}/data_sources/{ds_id}", headers=nh(nt, NOTION_VERSION_DS), json={"properties": missing}, timeout=30)
         p.raise_for_status()
@@ -425,6 +505,21 @@ def update_monthly_tables(nt, results, today, target, closing):
             else:
                 notes.append(f"{platform}-rekkevidde/engasjement settes ved månedsslutt")
 
+            # TikTok: visninger/interaksjoner = økning i livstidssum siden forrige måneds slutt
+            if platform == "TikTok":
+                st, sw = tt_stats(key[1])
+                if st is None:
+                    notes.append(f"TikTok-visninger tom: {sw}")
+                else:
+                    for col, helper_col, k in TT_MONTHLY:
+                        props[helper_col] = {"number": st[k]}
+                        pv = num(prev_row, helper_col)
+                        if isinstance(pv, (int, float)):
+                            props[col] = {"number": st[k] - int(pv)}
+                            notes.append(f"{col} {st[k] - int(pv)} (økning fra {int(pv)} til {st[k]})")
+                        else:
+                            notes.append(f"{col} tom: mangler livstidssum for {month_label(prev)} (første måling {st[k]})")
+
         if not props:
             print("  ingen tall å skrive")
             continue
@@ -450,6 +545,12 @@ def update_monthly_tables(nt, results, today, target, closing):
 def followers(key, results):
     """Instagram: Meta først (ferskt tall), Metrika som reserve. Andre: Metrika."""
     platform, identifier = key
+    if platform == "tiktok" and identifier in TT_REFRESH_SECRETS:
+        st, why = tt_stats(identifier)
+        if st and isinstance(st.get("followers"), int) and st["followers"] > 0:
+            return st["followers"], st
+        if why != "ingen TikTok-tilkobling":
+            gh_warn(f"TikTok @{identifier}: {why} – bruker Metrika")
     if platform == "instagram" and identifier in IG_TOKEN_SECRETS:
         v, m = ig_followers(identifier)
         if v is not None:
